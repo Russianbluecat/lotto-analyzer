@@ -233,36 +233,7 @@ def create_frequency_chart(df: pd.DataFrame) -> go.Figure:
     
     return fig
 
-# 📈 최근 추세 분석 차트
-def create_trend_chart(df: pd.DataFrame, recent_rounds: int = 50) -> go.Figure:
-    """최근 회차의 번호 분포 차트를 생성합니다."""
-    recent_df = df.tail(recent_rounds)
-    trend_data = []
-    
-    for _, row in recent_df.iterrows():
-        for num in row["번호"]:
-            trend_data.append({"회차": row["회차"], "번호": num})
-    
-    trend_df = pd.DataFrame(trend_data)
-    
-    fig = px.scatter(
-        trend_df,
-        x="회차", 
-        y="번호",
-        title=f"최근 {recent_rounds}회 번호 분포",
-        opacity=0.7,
-        color="번호",
-        color_continuous_scale="plasma"
-    )
-    
-    fig.update_layout(
-        xaxis_title="회차",
-        yaxis_title="번호",
-        yaxis=dict(dtick=5),
-        showlegend=False
-    )
-    
-    return fig
+
 
 # 📊 통계 정보 표시
 def display_statistics(df: pd.DataFrame):
@@ -318,13 +289,7 @@ def main():
         
         st.divider()
         
-        analysis_rounds = st.slider(
-            "최근 회차 분석 범위", 
-            min_value=10, 
-            max_value=100, 
-            value=50,
-            help="최근 몇 회차까지 추세를 분석할지 선택하세요"
-        )
+
         
         show_bonus = st.checkbox("보너스 번호 포함", value=False)
         
@@ -386,19 +351,9 @@ def main():
         st.divider()
         
         # 차트 표시
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("🎲 번호별 출현 빈도")
-            freq_chart = create_frequency_chart(df)
-            st.plotly_chart(freq_chart, use_container_width=True)
-        
-        with col2:
-            st.subheader("📈 최근 추세 분석")
-            # 분석 범위가 로딩된 데이터를 초과하지 않도록 조정
-            actual_analysis_rounds = min(analysis_rounds, len(df))
-            trend_chart = create_trend_chart(df, actual_analysis_rounds)
-            st.plotly_chart(trend_chart, use_container_width=True)
+        st.subheader("🎲 번호별 출현 빈도")
+        freq_chart = create_frequency_chart(df)
+        st.plotly_chart(freq_chart, use_container_width=True)
         
         # 상세 데이터 테이블
         with st.expander("📋 상세 데이터 보기"):
