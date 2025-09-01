@@ -566,11 +566,31 @@ def main():
         
         # 상세 데이터 테이블
         with st.expander("📋 상세 데이터 보기"):
-            display_df = df.tail(20).sort_values("회차", ascending=False)
+            display_df = df.tail(20).sort_values("회차", ascending=False).copy()
+            
+            # 번호 컬럼을 개별 컬럼으로 분리
+            for i in range(6):
+                display_df[f"번호{i+1}"] = display_df["번호"].apply(lambda x: x[i] if len(x) > i else None)
+            
+            # 표시할 컬럼 선택 (번호 컬럼 제외)
+            display_columns = ["회차", "날짜"] + [f"번호{i+1}" for i in range(6)] + ["보너스"]
+            display_df_final = display_df[display_columns]
+            
             st.dataframe(
-                display_df,
+                display_df_final,
                 use_container_width=True,
-                hide_index=True
+                hide_index=True,
+                column_config={
+                    "회차": st.column_config.NumberColumn("회차", width="small"),
+                    "날짜": st.column_config.DateColumn("날짜", width="medium"),
+                    "번호1": st.column_config.NumberColumn("1번", width="small"),
+                    "번호2": st.column_config.NumberColumn("2번", width="small"),
+                    "번호3": st.column_config.NumberColumn("3번", width="small"),
+                    "번호4": st.column_config.NumberColumn("4번", width="small"),
+                    "번호5": st.column_config.NumberColumn("5번", width="small"),
+                    "번호6": st.column_config.NumberColumn("6번", width="small"),
+                    "보너스": st.column_config.NumberColumn("보너스", width="small")
+                }
             )
             
             # 데이터 다운로드
