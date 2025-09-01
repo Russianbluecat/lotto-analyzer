@@ -7,6 +7,8 @@ from datetime import datetime, date
 import pytz
 import logging
 from typing import Optional, Dict, List
+import json
+import os
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -18,6 +20,54 @@ LOTTO_START_DATE = date(2002, 12, 7)  # 1회차 날짜
 KST = pytz.timezone("Asia/Seoul")
 SATURDAY_DRAW_HOUR = 21  # 토요일 추첨 시간
 DEFAULT_LOAD_COUNT = 100  # 기본 로딩 회차 수
+ADDITIONAL_LOAD_COUNT = 200  # 추가 로딩 회차 수
+CACHE_FILE = "lotto_cache.json"  # 오프라인 캐시 파일
+
+# 🔄 오프라인 캐시 관리
+def save_to_cache(df: pd.DataFrame):
+    """데이터를 로컬 캐시에 저장합니다."""
+    try:
+        cache_data = {
+            "data": df.to_dict('records'),
+            "last_updated": datetime.now(KST).isoformat(),
+            "total_rounds": len(df)
+        }
+        
+        # Streamlit의 임시 디렉토리 사용
+        cache_path = os.path.join(st.session_state.get('cache_dir', '.'), CACHE_FILE)
+        with open(cache_path, 'w', encoding='utf-8') as f:
+            json.dump(cache_data, f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"캐시 저장 완료: {len(df)}회차")
+        return True
+    except Exception as e:
+        logger.error(f"캐시 저장 실패: {e}")
+        return False
+
+def load_from_cache() -> Optional[pd.DataFrame]:
+    """로컬 캐시에서 데이터를 불러옵니다."""
+    try:
+        cache_path = os.path.join(st.session_state.get('cache_dir', '.'), CACHE_FILE)
+        if not os.path.exists(cache_path):
+            return None
+        
+        with open(cache_path, 'r', encoding='utf-8') as f:
+            cache_data = json.load(f)
+        
+        df = pd.DataFrame(cache_data['data'])
+        last_updated = datetime.fromisoformat(cache_data['last_updated'])
+        
+        # 캐시가 24시간 이내인 경우만 사용
+        if (datetime.now(KST) - last_updated).total_seconds() < 86400:  # 24시간
+            logger.info(f"캐시에서 데이터 로딩: {len(df)}회차")
+            return df
+        else:
+            logger.info("캐시 데이터가 만료됨")
+            return None
+            
+    except Exception as e:
+        logger.error(f"캐시 로딩 실패: {e}")
+        return None
 
 # ⚙️ 회차 데이터 가져오기
 def fetch_round_data(round_no: int) -> Optional[Dict]:
@@ -132,11 +182,11 @@ def load_lotto_data_range(start_round: int, end_round: int) -> pd.DataFrame:
         st.error(f"데이터 로딩 중 오류가 발생했습니다: {e}")
         return pd.DataFrame()
 
-# ⚙️ 점진적 데이터 로딩
+# ⚙️ 점진적 데이터 로딩 (개선됨)
 def load_lotto_data_progressive() -> pd.DataFrame:
     """
     점진적으로 로또 데이터를 불러옵니다.
-    처음에는 최근 데이터만, 필요시 더 많은 데이터를 로드합니다.
+    오프라인 캐시 우선, 온라인 로딩 후순위
     """
     latest_round = get_latest_round()
     
@@ -144,37 +194,64 @@ def load_lotto_data_progressive() -> pd.DataFrame:
     if 'loaded_rounds' not in st.session_state:
         st.session_state.loaded_rounds = 0
         st.session_state.lotto_data = pd.DataFrame()
+        st.session_state.initial_load_message_shown = False
+        st.session_state.cache_dir = os.getcwd()  # 현재 디렉토리
     
-    # 기본 로딩 범위 결정
+    # 첫 로딩 시도
     if st.session_state.loaded_rounds == 0:
-        # 처음 로딩: 최근 100회차 또는 전체 (더 적은 것)
+        # 1. 먼저 캐시에서 시도
+        cached_df = load_from_cache()
+        if cached_df is not None and not cached_df.empty:
+            # 캐시 데이터가 최신인지 확인
+            cached_latest = cached_df['회차'].max()
+            if cached_latest >= latest_round - 5:  # 5회차 이내면 사용
+                st.session_state.lotto_data = cached_df
+                st.session_state.loaded_rounds = len(cached_df)
+                
+                if not st.session_state.initial_load_message_shown:
+                    st.success(f"💾 오프라인 캐시에서 {len(cached_df)}회차 데이터를 불러왔습니다!")
+                    st.session_state.initial_load_message_shown = True
+                
+                return cached_df
+        
+        # 2. 캐시가 없거나 오래된 경우 온라인 로딩
         load_count = min(DEFAULT_LOAD_COUNT, latest_round)
         start_round = max(1, latest_round - load_count + 1)
         end_round = latest_round
         
-        st.info(f"⚡ 빠른 시작을 위해 최근 {load_count}회차만 먼저 로딩합니다.")
+        if not st.session_state.initial_load_message_shown:
+            if cached_df is not None:
+                st.info(f"🔄 캐시가 오래되어 최신 {load_count}회차 데이터를 새로 로딩합니다.")
+            else:
+                st.info(f"⚡ 빠른 시작을 위해 최근 {load_count}회차를 먼저 로딩합니다.")
+            st.session_state.initial_load_message_shown = True
+        
         df = load_lotto_data_range(start_round, end_round)
         
-        st.session_state.lotto_data = df
-        st.session_state.loaded_rounds = load_count
+        if not df.empty:
+            st.session_state.lotto_data = df
+            st.session_state.loaded_rounds = load_count
+            
+            # 캐시에 저장
+            save_to_cache(df)
         
         return df
     else:
         return st.session_state.lotto_data
 
-# ⚙️ 추가 데이터 로딩
-def load_more_data():
-    """더 많은 과거 데이터를 로딩합니다."""
-    latest_round = get_latest_round()
+# ⚙️ 추가 데이터 로딩 (개선됨)
+def load_additional_data(count: int = ADDITIONAL_LOAD_COUNT):
+    """지정된 수만큼 추가 과거 데이터를 로딩합니다."""
     current_df = st.session_state.lotto_data
     
     if current_df.empty:
+        st.warning("⚠️ 기본 데이터를 먼저 로딩해주세요.")
         return
     
     current_min_round = current_df['회차'].min()
     
     # 추가로 로딩할 범위 계산
-    additional_count = min(200, current_min_round - 1)  # 최대 200회차씩 추가
+    additional_count = min(count, current_min_round - 1)
     
     if additional_count <= 0:
         st.warning("📋 모든 데이터가 이미 로딩되었습니다!")
@@ -183,21 +260,67 @@ def load_more_data():
     start_round = max(1, current_min_round - additional_count)
     end_round = current_min_round - 1
     
-    st.info(f"📚 {start_round}~{end_round} 회차 ({additional_count}개) 추가 로딩 중...")
-    
-    # 추가 데이터 로딩
-    additional_df = load_lotto_data_range(start_round, end_round)
-    
-    if not additional_df.empty:
-        # 기존 데이터와 합치기
-        combined_df = pd.concat([additional_df, current_df], ignore_index=True)
-        combined_df = combined_df.sort_values('회차').reset_index(drop=True)
+    with st.spinner(f"📚 {start_round}~{end_round} 회차 ({additional_count}개) 추가 로딩 중..."):
+        # 추가 데이터 로딩
+        additional_df = load_lotto_data_range(start_round, end_round)
         
-        st.session_state.lotto_data = combined_df
-        st.session_state.loaded_rounds += len(additional_df)
+        if not additional_df.empty:
+            # 기존 데이터와 합치기
+            combined_df = pd.concat([additional_df, current_df], ignore_index=True)
+            combined_df = combined_df.sort_values('회차').reset_index(drop=True)
+            
+            st.session_state.lotto_data = combined_df
+            st.session_state.loaded_rounds = len(combined_df)
+            
+            # 캐시 업데이트
+            save_to_cache(combined_df)
+            
+            st.success(f"✅ {additional_count}회차 추가 완료! 총 {len(combined_df)}회차 데이터 준비됨")
+            st.rerun()
+        else:
+            st.error("❌ 추가 데이터 로딩에 실패했습니다.")
+
+# ⚙️ 전체 데이터 로딩
+def load_all_data():
+    """전체 데이터를 로딩합니다."""
+    latest_round = get_latest_round()
+    
+    with st.spinner(f"📊 전체 {latest_round}회차 데이터 로딩 중... (시간이 다소 걸릴 수 있습니다)"):
+        full_df = load_lotto_data_range(1, latest_round)
         
-        st.success(f"✅ 총 {len(combined_df)}회차 데이터 준비완료!")
-        st.rerun()
+        if not full_df.empty:
+            st.session_state.lotto_data = full_df
+            st.session_state.loaded_rounds = len(full_df)
+            
+            # 캐시에 저장
+            save_to_cache(full_df)
+            
+            st.success(f"✅ 전체 {len(full_df)}회차 데이터 로딩 완료!")
+            st.rerun()
+        else:
+            st.error("❌ 전체 데이터 로딩에 실패했습니다.")
+
+# ⚙️ 데이터 상태 체크
+def check_data_freshness() -> tuple[bool, str]:
+    """데이터의 최신성을 체크합니다."""
+    try:
+        current_df = st.session_state.get('lotto_data', pd.DataFrame())
+        if current_df.empty:
+            return False, "데이터 없음"
+        
+        latest_round = get_latest_round()
+        data_latest = current_df['회차'].max()
+        
+        if data_latest >= latest_round:
+            return True, "최신"
+        elif latest_round - data_latest <= 2:
+            return True, "거의 최신"
+        else:
+            return False, f"{latest_round - data_latest}회차 뒤처짐"
+            
+    except Exception as e:
+        logger.error(f"데이터 최신성 체크 실패: {e}")
+        return False, "확인 불가"
 
 # 📊 번호 빈도 분석 차트
 def create_frequency_chart(df: pd.DataFrame) -> go.Figure:
@@ -233,8 +356,6 @@ def create_frequency_chart(df: pd.DataFrame) -> go.Figure:
     
     return fig
 
-
-
 # 📊 통계 정보 표시
 def display_statistics(df: pd.DataFrame):
     """기본 통계 정보를 표시합니다."""
@@ -262,6 +383,112 @@ def display_statistics(df: pd.DataFrame):
         avg_freq = pd.Series(flat_numbers).value_counts().mean()
         st.metric("평균 출현 횟수", f"{avg_freq:.1f}회")
 
+# 📱 사이드바 UI (개선됨)
+def render_sidebar():
+    """개선된 사이드바를 렌더링합니다."""
+    with st.sidebar:
+        st.header("⚙️ 데이터 관리")
+        
+        # 현재 로딩 상태 표시
+        if 'loaded_rounds' in st.session_state and st.session_state.loaded_rounds > 0:
+            total_available = get_latest_round()
+            loaded_rounds = st.session_state.loaded_rounds
+            loaded_pct = (loaded_rounds / total_available) * 100
+            
+            # 데이터 상태 체크
+            is_fresh, freshness_status = check_data_freshness()
+            status_color = "🟢" if is_fresh else "🟡"
+            
+            st.metric(
+                "로딩된 데이터", 
+                f"{loaded_rounds:,}회차",
+                f"{loaded_pct:.1f}% | {status_color} {freshness_status}"
+            )
+            
+            # 데이터 범위 표시
+            current_df = st.session_state.lotto_data
+            if not current_df.empty:
+                min_round = current_df['회차'].min()
+                max_round = current_df['회차'].max()
+                st.caption(f"📊 범위: {min_round}~{max_round}회차")
+            
+            st.divider()
+            
+            # 데이터 로딩 옵션들
+            st.subheader("📊 데이터 확장")
+            
+            # 추가 200회차 로딩
+            remaining_rounds = max(0, current_df['회차'].min() - 1) if not current_df.empty else 0
+            can_load_more = remaining_rounds > 0
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(
+                    f"📚 +200회차", 
+                    disabled=not can_load_more,
+                    use_container_width=True,
+                    help=f"추가로 200회차 로딩 (남은 회차: {remaining_rounds}개)"
+                ):
+                    load_additional_data(200)
+            
+            with col2:
+                if st.button(
+                    f"📑 +500회차", 
+                    disabled=not can_load_more,
+                    use_container_width=True,
+                    help=f"추가로 500회차 로딩 (남은 회차: {remaining_rounds}개)"
+                ):
+                    load_additional_data(500)
+            
+            # 전체 데이터 로딩
+            if loaded_pct < 100:
+                if st.button("📊 전체 데이터 로딩", use_container_width=True):
+                    load_all_data()
+            
+        else:
+            # 초기 상태
+            st.info("🚀 데이터를 불러오는 중입니다...")
+        
+        st.divider()
+        
+        # 분석 옵션
+        st.subheader("🔧 분석 옵션")
+        show_bonus = st.checkbox("보너스 번호 포함", value=False)
+        
+        st.divider()
+        
+        # 캐시 및 새로고침 옵션
+        st.subheader("🔄 데이터 관리")
+        
+        # 캐시 상태 표시
+        cache_exists = os.path.exists(os.path.join(st.session_state.get('cache_dir', '.'), CACHE_FILE))
+        if cache_exists:
+            st.caption("💾 오프라인 캐시 사용 가능")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔄 새로고침", use_container_width=True, help="온라인에서 최신 데이터 다시 로딩"):
+                # 세션 상태 초기화
+                for key in ['loaded_rounds', 'lotto_data', 'initial_load_message_shown']:
+                    if key in st.session_state:
+                        del st.session_state[key]
+                st.cache_data.clear()
+                st.rerun()
+        
+        with col2:
+            if st.button("🗑️ 캐시 삭제", use_container_width=True, help="저장된 오프라인 데이터 삭제"):
+                try:
+                    cache_path = os.path.join(st.session_state.get('cache_dir', '.'), CACHE_FILE)
+                    if os.path.exists(cache_path):
+                        os.remove(cache_path)
+                        st.success("캐시 삭제 완료!")
+                    else:
+                        st.info("삭제할 캐시가 없습니다.")
+                except Exception as e:
+                    st.error(f"캐시 삭제 실패: {e}")
+        
+        return show_bonus
+
 # 📱 메인 앱
 def main():
     """메인 애플리케이션 함수"""
@@ -275,61 +502,37 @@ def main():
     st.title("🎯 로또 번호 분석기")
     st.markdown("**동행복권 로또 6/45 번호 분석 도구**")
     
-    # 사이드바 옵션
-    with st.sidebar:
-        st.header("⚙️ 분석 옵션")
-        
-        # 데이터 로딩 상태 표시
-        if 'loaded_rounds' in st.session_state and st.session_state.loaded_rounds > 0:
-            st.info(f"📊 현재 {st.session_state.loaded_rounds}회차 로딩됨")
-            
-            # 더 많은 데이터 로딩 버튼
-            if st.button("📚 더 많은 과거 데이터 로딩", use_container_width=True):
-                load_more_data()
-        
-        st.divider()
-        
-
-        
-        show_bonus = st.checkbox("보너스 번호 포함", value=False)
-        
-        st.divider()
-        
-        # 데이터 새로고침
-        if st.button("🔄 데이터 새로고침", use_container_width=True):
-            # 세션 상태 초기화
-            if 'loaded_rounds' in st.session_state:
-                del st.session_state.loaded_rounds
-            if 'lotto_data' in st.session_state:
-                del st.session_state.lotto_data
-            st.cache_data.clear()
-            st.rerun()
-        
-        # 전체 데이터 로딩
-        if st.button("📊 전체 데이터 로딩", use_container_width=True):
-            latest_round = get_latest_round()
-            st.info(f"🔄 전체 {latest_round}회차 데이터를 로딩합니다. 시간이 오래 걸릴 수 있습니다.")
-            
-            full_df = load_lotto_data_range(1, latest_round)
-            if not full_df.empty:
-                st.session_state.lotto_data = full_df
-                st.session_state.loaded_rounds = len(full_df)
-                st.success(f"✅ 전체 {len(full_df)}회차 데이터 로딩 완료!")
-                st.rerun()
+    # 사이드바 렌더링
+    show_bonus = render_sidebar()
     
-    # 데이터 로딩
+    # 메인 컨텐츠
     try:
+        # 연결 상태 체크
+        try:
+            test_response = requests.get("https://www.google.com", timeout=3)
+            online_status = "🟢 온라인"
+        except:
+            online_status = "🔴 오프라인"
+        
+        # 상태 표시
+        status_col1, status_col2 = st.columns([3, 1])
+        with status_col2:
+            st.caption(f"연결상태: {online_status}")
+        
+        # 데이터 로딩
         df = load_lotto_data_progressive()
         
         if df.empty:
-            st.error("⚠️ 데이터를 불러올 수 없습니다. 잠시 후 다시 시도해주세요.")
+            if online_status == "🔴 오프라인":
+                st.error("⚠️ 오프라인 상태이며 사용 가능한 캐시 데이터가 없습니다.")
+                st.info("💡 인터넷에 연결 후 데이터를 다시 로딩해주세요.")
+            else:
+                st.error("⚠️ 데이터를 불러올 수 없습니다. 잠시 후 다시 시도해주세요.")
             return
         
-        # 기본 정보 표시
+        # 데이터 정보 표시
         latest_round_in_data = df['회차'].max()
         latest_date = df[df['회차'] == latest_round_in_data]['날짜'].iloc[0]
-        
-        # 데이터 범위 표시
         min_round = df['회차'].min()
         max_round = df['회차'].max()
         
@@ -337,12 +540,18 @@ def main():
         with col1:
             st.success(f"✅ 최신 회차: **{max_round}회** ({latest_date})")
         with col2:
-            st.info(f"📊 분석 범위: **{min_round}~{max_round}회** (총 {len(df)}회차)")
+            st.info(f"📊 분석 범위: **{min_round}~{max_round}회** (총 {len(df):,}회차)")
         
-        # 더 많은 데이터가 있는지 확인
+        # 로딩 완료도 표시
         total_available = get_latest_round()
         if len(df) < total_available:
-            st.warning(f"💡 더 정확한 분석을 위해 **전체 {total_available}회차** 데이터를 로딩할 수 있습니다. (사이드바 참고)")
+            remaining = total_available - len(df)
+            completion_pct = (len(df) / total_available) * 100
+            st.progress(completion_pct / 100)
+            st.caption(f"💡 전체 데이터의 {completion_pct:.1f}% 로딩됨 (남은 회차: {remaining}개)")
+        else:
+            st.progress(1.0)
+            st.caption("🎉 모든 데이터가 로딩되었습니다!")
         
         # 통계 정보
         st.subheader("📊 기본 통계")
@@ -369,7 +578,7 @@ def main():
             st.download_button(
                 label="📥 CSV 다운로드",
                 data=csv,
-                file_name=f"lotto_data_{min_round}_{max_round}.csv",
+                file_name=f"lotto_data_{min_round}_{max_round}_{datetime.now().strftime('%Y%m%d')}.csv",
                 mime="text/csv"
             )
     
